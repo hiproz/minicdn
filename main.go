@@ -7,7 +7,10 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/golang/groupcache"
@@ -35,10 +38,14 @@ func generateThumbnail(filename string) ([]byte, error) {
 }
 
 func FileHandler(w http.ResponseWriter, r *http.Request) {
-	var ctx groupcache.Context
 	key := r.URL.Path
+
+	state.addActiveDownload(1)
+	defer state.addActiveDownload(-1)
+
 	fmt.Println("KEY:", key)
 	var data []byte
+	var ctx groupcache.Context
 	err := thumbNails.Get(ctx, key, groupcache.AllocatingByteSliceSink(&data))
 	if err != nil {
 		http.Error(w, err.Error(), 500)
@@ -57,6 +64,26 @@ var (
 	address  = flag.String("addr", ":5000", "Listen address")
 )
 
+func InitSignal() {
+	sig := make(chan os.Signal, 2)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		for {
+			s := <-sig
+			fmt.Println("Got signal:", s)
+			if state.Closed {
+				fmt.Println("Cold close !!!")
+				os.Exit(1)
+			}
+			fmt.Println("Warm close, waiting ...")
+			go func() {
+				state.Close()
+				os.Exit(0)
+			}()
+		}
+	}()
+}
+
 func main() {
 	flag.Parse()
 
@@ -74,6 +101,7 @@ func main() {
 		}
 	}
 
+	InitSignal()
 	fmt.Println("Hello CDN")
 	http.HandleFunc("/", FileHandler)
 	log.Fatal(http.ListenAndServe(*address, nil))

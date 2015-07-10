@@ -5,11 +5,55 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 const defaultWSURL = "/_ws/"
+
+var (
+	upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+	}
+	state = ServerState{
+		ActiveDownload: 0,
+		Closed:         false,
+	}
+	slaves = make(map[string]Slave, 10)
+)
+
+type Slave struct {
+	Name           string
+	Connection     *websocket.Conn
+	ActiveDownload int
+}
+
+type ServerState struct {
+	sync.Mutex
+	ActiveDownload int
+	Closed         bool
+}
+
+func (s *ServerState) addActiveDownload(n int) {
+	s.Lock()
+	defer s.Unlock()
+	s.ActiveDownload += n
+}
+
+func (s *ServerState) Close() error {
+	s.Closed = true
+	time.Sleep(time.Millisecond * 5000) // 0.5s
+	for {
+		if s.ActiveDownload == 0 { // Wait until all download finished
+			break
+		}
+		time.Sleep(time.Millisecond * 100)
+	}
+	return nil
+}
 
 func InitSlave() (err error) {
 	u, err := url.Parse(*upstream)
@@ -29,20 +73,7 @@ func InitSlave() (err error) {
 	return nil
 }
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-}
-var slaves map[string]Slave
-
-type Slave struct {
-	Name           string
-	Connection     *websocket.Conn
-	ActiveDownload int
-}
-
 func InitMaster() (err error) {
-	slaves = make(map[string]Slave, 10)
 	http.HandleFunc(defaultWSURL, WSHandler)
 	return nil
 }
