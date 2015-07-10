@@ -1,13 +1,17 @@
 package main
 
 import (
+	"errors"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/golang/groupcache"
 	"github.com/gorilla/websocket"
 )
 
@@ -22,13 +26,73 @@ var (
 		ActiveDownload: 0,
 		Closed:         false,
 	}
-	slaves = make(map[string]Slave, 10)
+	slaveMap = SlaveMap{
+		m: make(map[string]Slave, 10),
+	}
+
+	pool     *groupcache.HTTPPool
+	wsclient *websocket.Conn
 )
 
 type Slave struct {
 	Name           string
 	Connection     *websocket.Conn
 	ActiveDownload int
+}
+
+type SlaveMap struct {
+	sync.RWMutex
+	m map[string]Slave
+}
+
+func (sm *SlaveMap) AddSlave(name string, conn *websocket.Conn) {
+	sm.Lock()
+	defer sm.Unlock()
+	sm.m[name] = Slave{
+		Name:       name,
+		Connection: conn,
+	}
+}
+
+func (sm *SlaveMap) Delete(name string) {
+	sm.Lock()
+	delete(sm.m, name)
+	sm.Unlock()
+}
+
+func (sm *SlaveMap) Keys() []string {
+	sm.RLock()
+	defer sm.RUnlock()
+	keys := []string{}
+	for key, _ := range sm.m {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (sm *SlaveMap) PeekSlave() (string, error) {
+	// FIXME(ssx): need to order by active download count
+	sm.RLock()
+	defer sm.RUnlock()
+	ridx := rand.Int()
+	keys := []string{}
+	for key, _ := range sm.m {
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return "", errors.New("Slave count zero")
+	}
+	return keys[ridx%len(keys)], nil
+}
+
+func (sm *SlaveMap) BroadcastJSON(v interface{}) error {
+	var err error
+	for _, s := range sm.m {
+		if err = s.Connection.WriteJSON(v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type ServerState struct {
@@ -45,7 +109,7 @@ func (s *ServerState) addActiveDownload(n int) {
 
 func (s *ServerState) Close() error {
 	s.Closed = true
-	time.Sleep(time.Millisecond * 5000) // 0.5s
+	time.Sleep(time.Millisecond * 500) // 0.5s
 	for {
 		if s.ActiveDownload == 0 { // Wait until all download finished
 			break
@@ -65,24 +129,63 @@ func InitSlave() (err error) {
 	if err != nil {
 		return
 	}
-	client, _, err := websocket.NewClient(conn, u, nil, 1024, 1024)
+	wsclient, _, err = websocket.NewClient(conn, u, nil, 1024, 1024)
 	if err != nil {
 		return
 	}
-	client.WriteMessage(1, []byte("hello"))
+
+	// Get slave name from master
+	_, port, _ := net.SplitHostPort(*address)
+	wsclient.WriteJSON(map[string]string{
+		"action": "LOGIN",
+		"token":  *token,
+		"port":   port,
+	})
+	var msg = make(map[string]string)
+	if err = wsclient.ReadJSON(&msg); err != nil {
+		return err
+	}
+	if me, ok := msg["self"]; ok {
+		if pool == nil {
+			pool = groupcache.NewHTTPPool(me)
+		}
+		peers := strings.Split(msg["peers"], ",")
+		m := msg["mirror"]
+		mirror = &m
+		log.Println("Self name:", me)
+		log.Println("Peer list:", peers)
+		log.Println("Mirror site:", *mirror)
+		pool.Set(peers...)
+	} else {
+		return errors.New("'peer_name' not found in master response")
+	}
+
+	// Listen peers update
+	go func() {
+		for {
+			err := wsclient.ReadJSON(&msg)
+			if err != nil {
+				log.Println("Connection to master closed, retry in 10 seconds")
+				time.Sleep(time.Second * 10)
+				InitSlave()
+				break
+			}
+			action := msg["action"]
+			switch action {
+			case "PEER_UPDATE":
+				peers := strings.Split(msg["peers"], ",")
+				log.Println("Update peer list:", peers)
+				pool.Set(peers...)
+			}
+		}
+	}()
+
 	return nil
 }
 
 func InitMaster() (err error) {
 	http.HandleFunc(defaultWSURL, WSHandler)
 	return nil
-}
-
-func init() {
-	//var me = "http://127.0.0.1:5000"
-	//var peers = groupcache.NewHTTPPool(me)
-
-	//peers.Set("http://
 }
 
 func WSHandler(w http.ResponseWriter, r *http.Request) {
@@ -94,20 +197,54 @@ func WSHandler(w http.ResponseWriter, r *http.Request) {
 	log.Println(conn.RemoteAddr())
 	defer conn.Close()
 
-	name := conn.RemoteAddr().String()
-	slave := Slave{
-		Name:           name,
-		Connection:     conn,
-		ActiveDownload: 0,
-	}
-	slaves[name] = slave
-
+	var name string
+	remoteHost, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
+	var msg = make(map[string]string)
 	for {
-		msgType, p, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("Read Msg ERR:", err)
-			return
+		var err error
+		if err = conn.ReadJSON(&msg); err != nil {
+			break
 		}
-		log.Println(msgType, string(p))
+
+		log.Println(msg)
+		switch msg["action"] {
+		case "LOGIN":
+			name = "http://" + remoteHost + ":" + msg["port"]
+			currKeys := slaveMap.Keys()
+			slaveMap.AddSlave(name, conn)
+			err = conn.WriteJSON(map[string]string{
+				"self":   name,
+				"peers":  strings.Join(slaveMap.Keys(), ","),
+				"mirror": *mirror,
+			})
+
+			slaveMap.RLock()
+			for _, key := range currKeys {
+				if s, exists := slaveMap.m[key]; exists {
+					s.Connection.WriteJSON(map[string]string{
+						"action": "PEER_UPDATE",
+						"peers":  strings.Join(slaveMap.Keys(), ","),
+					})
+				}
+			}
+			slaveMap.RUnlock()
+			log.Printf("Slave: %s JOIN", name)
+		}
+		if err != nil {
+			break
+		}
 	}
+
+	slaveMap.Delete(name)
+	slaveMap.RLock()
+	for _, key := range slaveMap.Keys() {
+		if s, exists := slaveMap.m[key]; exists {
+			s.Connection.WriteJSON(map[string]string{
+				"action": "PEER_UPDATE",
+				"peers":  strings.Join(slaveMap.Keys(), ","),
+			})
+		}
+	}
+	slaveMap.RUnlock()
+	log.Printf("Slave: %s QUIT", name)
 }
