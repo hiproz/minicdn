@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -11,13 +12,6 @@ import (
 
 	"github.com/golang/groupcache"
 )
-
-var me = "http://127.0.0.1:5000"
-var peers = groupcache.NewHTTPPool(me)
-
-func init() {
-	//peers.Set("http://
-}
 
 var thumbNails = groupcache.NewGroup("thunbnail", 512<<20, groupcache.GetterFunc(
 	func(ctx groupcache.Context, key string, dest groupcache.Sink) error {
@@ -56,7 +50,16 @@ func FileHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, filepath.Base(key), modTime, rd)
 }
 
+var (
+	mirror   = flag.String("mirror", "", "Mirror Web Base URL")
+	logfile  = flag.String("log", "-", "Set log file, default STDOUT")
+	upstream = flag.String("upstream", "", "Server base URL, conflict with -mirror")
+	address  = flag.String("addr", ":5000", "Listen address")
+)
+
 func main() {
+	flag.Parse()
+
 	fmt.Println("Hello CDN")
 	http.HandleFunc("/", FileHandler)
 	log.Fatal(http.ListenAndServe(":5000", nil))
