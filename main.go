@@ -60,7 +60,21 @@ var (
 func main() {
 	flag.Parse()
 
+	if *mirror != "" && *upstream != "" {
+		log.Fatal("Can't set both -mirror and -upstream")
+	}
+	if *upstream != "" {
+		if err := InitSlave(); err != nil {
+			log.Fatal(err)
+		}
+	}
+	if *mirror != "" {
+		if err := InitMaster(); err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	fmt.Println("Hello CDN")
 	http.HandleFunc("/", FileHandler)
-	log.Fatal(http.ListenAndServe(":5000", nil))
+	log.Fatal(http.ListenAndServe(*address, nil))
 }
