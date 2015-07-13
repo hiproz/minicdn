@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/golang/groupcache"
+	"github.com/codeskyblue/groupcache"
 	"github.com/gorilla/websocket"
 )
 

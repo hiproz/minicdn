@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang/groupcache"
+	"github.com/codeskyblue/groupcache"
 )
 
 var thumbNails = groupcache.NewGroup("thumbnail", 512<<20, groupcache.GetterFunc(
@@ -120,7 +120,7 @@ func main() {
 	}
 
 	InitSignal()
-	fmt.Println("Hello CDN")
+	//fmt.Println("Hello CDN")
 	http.HandleFunc("/", FileHandler)
 	log.Printf("Listening on %s", *address)
 	log.Fatal(http.ListenAndServe(*address, nil))

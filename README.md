@@ -26,3 +26,9 @@ go build
 ```shell
 ./minicdn -upstream http://localhost:11000 -addr :8001
 ```
+
+### TODO
+* token
+* use a slave as a master
+* request log
+* cli args to specify cache size
