@@ -58,3 +58,6 @@ Manager与Peer是一对多的关系
 * use a slave as a master
 * request log
 * cli args to specify cache size
+
+## LICENSE
+Under [MIT LICENSE](LICENSE)
